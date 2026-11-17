@@ -1,0 +1,177 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  CUSTOMER
+  VENDOR
+}
+
+enum VendorStatus {
+  PENDING
+  APPROVED
+  SUSPENDED
+}
+
+enum OrderStatus {
+  SEARCHING
+  ACCEPTED
+  ON_THE_WAY
+  ARRIVED
+  DELIVERED
+  CANCELLED
+  NO_VENDOR_AVAILABLE
+}
+
+enum OfferStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+}
+
+model User {
+  id             String         @id @default(uuid())
+  name           String
+  mobileNumber   String         @unique
+  role           Role
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  vendorProfile  VendorProfile?
+  addresses      Address[]
+  customerOrders Order[]        @relation("CustomerOrders")
+  vendorOrders   Order[]        @relation("VendorOrders")
+  deviceTokens   DeviceToken[]
+  refreshTokens  RefreshToken[]
+}
+
+model VendorProfile {
+  id                 String       @id @default(uuid())
+  userId             String       @unique
+  user               User         @relation(fields: [userId], references: [id])
+  status             VendorStatus @default(PENDING)
+  isOnline           Boolean      @default(false)
+  latitude           Float?
+  longitude          Float?
+  locationAccuracy   Float?
+  lastLocationUpdate DateTime?
+  pricePerCanPaise   Int
+  serviceRadiusM     Int          @default(1500)
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  @@index([isOnline, status, lastLocationUpdate])
+}
+
+model Address {
+  id           String   @id @default(uuid())
+  customerId   String
+  customer     User     @relation(fields: [customerId], references: [id])
+  houseNumber  String
+  street       String
+  locality     String
+  floor        Int // 0 = ground floor
+  flatNumber   String?
+  landmark     String?
+  instructions String?
+  latitude     Float
+  longitude    Float
+  createdAt    DateTime @default(now())
+  orders       Order[]
+
+  @@index([customerId])
+}
+
+model Order {
+  id               String        @id @default(uuid())
+  customerId       String
+  customer         User          @relation("CustomerOrders", fields: [customerId], references: [id])
+  vendorId         String?
+  vendor           User?         @relation("VendorOrders", fields: [vendorId], references: [id])
+  addressId        String
+  address          Address       @relation(fields: [addressId], references: [id])
+  quantity         Int
+  floor            Int
+  pricePerCanPaise Int? // locked when a vendor accepts
+  totalPaise       Int? // final amount, set at acceptance
+  estimatePaise    Int // shown to the customer at booking
+  paymentMethod    PaymentMethod @default(CASH)
+  latitude         Float
+  longitude        Float
+  status           OrderStatus   @default(SEARCHING)
+  cancelledBy      Role?
+  cancelReason     String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  offers           OrderOffer[]
+  events           OrderEvent[]
+
+  @@index([customerId, createdAt])
+  @@index([vendorId, status])
+  @@index([status])
+}
+
+model OrderOffer {
+  id          String      @id @default(uuid())
+  orderId     String
+  order       Order       @relation(fields: [orderId], references: [id])
+  vendorId    String
+  distanceM   Int
+  status      OfferStatus @default(PENDING)
+  sentAt      DateTime    @default(now())
+  expiresAt   DateTime
+  respondedAt DateTime?
+
+  @@unique([orderId, vendorId])
+  @@index([vendorId, status])
+  @@index([status, expiresAt])
+}
+
+model OrderEvent {
+  id      String      @id @default(uuid())
+  orderId String
+  order   Order       @relation(fields: [orderId], references: [id])
+  status  OrderStatus
+  actorId String?
+  at      DateTime    @default(now())
+
+  @@index([orderId, at])
+}
+
+model DeviceToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  token     String   @unique
+  platform  String   @default("android")
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+
+  @@index([userId])
+}
+
+model Setting {
+  key   String @id
+  value Json
+}
