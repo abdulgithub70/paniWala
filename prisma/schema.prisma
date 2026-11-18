@@ -88,9 +88,10 @@ model Address {
   latitude     Float
   longitude    Float
   createdAt    DateTime @default(now())
+  deletedAt    DateTime? // soft delete: orders keep referencing old addresses
   orders       Order[]
 
-  @@index([customerId])
+  @@index([customerId, deletedAt])
 }
 
 model Order {
