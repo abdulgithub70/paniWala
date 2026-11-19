@@ -1,10 +1,10 @@
 import {
-  BadRequestException, ConflictException, Injectable, NotFoundException, UnauthorizedException,
+  BadRequestException, ConflictException, Injectable, Logger, NotFoundException, UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Prisma, Role } from '@prisma/client';
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { normalizeIndianMobile } from '../common/phone.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { FirebaseService } from './firebase.service';
@@ -21,7 +21,42 @@ export class AuthService {
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
     private readonly firebase: FirebaseService,
-  ) {}
+  ) {
+    const policy = this.otpPolicy();
+    if (policy && this.config.get('NODE_ENV') === 'production') {
+      this.logger.warn(
+        'STATIC OTP LOGIN IS ACTIVE IN PRODUCTION. Anyone who knows the code can log in as any allowed number. ' +
+          'Turn off STATIC_OTP_ENABLED before real users join.',
+      );
+    }
+  }
+
+  private readonly logger = new Logger(AuthService.name);
+
+  /**
+   * Which OTP login (if any) is allowed right now.
+   * - Local dev: DEV_OTP_ENABLED (never honoured in production).
+   * - Temporary fixed OTP, also in production: STATIC_OTP_ENABLED + STATIC_OTP_CODE,
+   *   optionally limited to STATIC_OTP_ALLOWED_NUMBERS.
+   */
+  private otpPolicy(): { code: string; allowed: Set<string> | null } | null {
+    const isProd = this.config.get('NODE_ENV') === 'production';
+    if (!isProd && this.config.get('DEV_OTP_ENABLED') === 'true') {
+      return { code: this.config.get<string>('DEV_OTP_CODE') ?? '123456', allowed: null };
+    }
+    if (this.config.get('STATIC_OTP_ENABLED') === 'true') {
+      const code = this.config.get<string>('STATIC_OTP_CODE');
+      if (!code) return null;
+      const list = (this.config.get<string>('STATIC_OTP_ALLOWED_NUMBERS') ?? '')
+        .split(',')
+        .map((x) => x.trim())
+        .filter(Boolean)
+        .map((x) => normalizeIndianMobile(x))
+        .filter((x): x is string => !!x);
+      return { code, allowed: list.length ? new Set(list) : null };
+    }
+    return null;
+  }
 
   // ---------- login paths ----------
 
@@ -33,13 +68,20 @@ export class AuthService {
   }
 
   async loginWithDevOtp(mobileNumber: string, otp: string, name?: string, role?: Role) {
-    const enabled = this.config.get('DEV_OTP_ENABLED') === 'true' && this.config.get('NODE_ENV') !== 'production';
-    if (!enabled) throw new NotFoundException(); // endpoint does not exist outside dev
-    if (otp !== (this.config.get<string>('DEV_OTP_CODE') ?? '123456')) {
-      throw new UnauthorizedException('Invalid OTP');
-    }
+    const policy = this.otpPolicy();
+    if (!policy) throw new NotFoundException(); // endpoint does not exist when no OTP mode is on
+
+    const given = Buffer.from(otp);
+    const expected = Buffer.from(policy.code);
+    const codeOk = given.length === expected.length && timingSafeEqual(given, expected);
+    if (!codeOk) throw new UnauthorizedException('Invalid OTP');
+
     const mobile = normalizeIndianMobile(mobileNumber);
     if (!mobile) throw new BadRequestException('Invalid mobile number');
+
+    // Same message as a wrong code, so the allowlist is not revealed.
+    if (policy.allowed && !policy.allowed.has(mobile)) throw new UnauthorizedException('Invalid OTP');
+
     return this.loginOrRegister(mobile, name, role);
   }
 

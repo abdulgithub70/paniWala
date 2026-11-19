@@ -16,5 +16,15 @@ export function validateEnv(config: Record<string, unknown>) {
       }
     }
   }
+
+  if (config.STATIC_OTP_ENABLED === 'true') {
+    const code = String(config.STATIC_OTP_CODE ?? '');
+    if (!/^\d{6}$/.test(code)) {
+      throw new Error('STATIC_OTP_CODE must be exactly 6 digits when STATIC_OTP_ENABLED=true');
+    }
+    if (config.NODE_ENV === 'production' && ['123456', '000000', '111111', '654321'].includes(code)) {
+      throw new Error('STATIC_OTP_CODE is too easy to guess for production, choose another 6 digits');
+    }
+  }
   return config;
 }
