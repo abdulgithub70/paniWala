@@ -1,4 +1,4 @@
-import { boundingBox, haversineM } from './geo.util';
+import { boundingBox, etaMinutesRange, haversineM } from './geo.util';
 
 describe('geo.util', () => {
   it('0.01 degree of latitude is about 1.1 km', () => {
@@ -18,5 +18,13 @@ describe('geo.util', () => {
     expect(p.lng).toBeLessThan(box.maxLng);
     expect(box.minLat).toBeLessThan(28.55);
     expect(box.maxLng).toBeGreaterThan(77.3);
+  });
+
+  it('eta is a sensible range and never below 1 minute', () => {
+    const [lo, hi] = etaMinutesRange(300); // 300 m
+    expect(lo).toBeGreaterThanOrEqual(1);
+    expect(hi).toBeGreaterThan(lo);
+    expect(hi).toBeLessThan(15);
+    expect(etaMinutesRange(0)[0]).toBe(1);
   });
 });

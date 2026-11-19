@@ -16,3 +16,15 @@ export function boundingBox(lat: number, lng: number, radiusM: number) {
   const dLng = radiusM / (111_320 * Math.max(Math.cos(toRad(lat)), 0.01));
   return { minLat: lat - dLat, maxLat: lat + dLat, minLng: lng - dLng, maxLng: lng + dLng };
 }
+
+/**
+ * Rough arrival range in whole minutes for a handcart. Straight-line distance is multiplied by 1.3
+ * for lanes. Shown as a range because it is an estimate, not a promise.
+ */
+export function etaMinutesRange(distanceM: number, speedKmh = 3.5): [number, number] {
+  const metersPerMin = (speedKmh * 1000) / 60;
+  const base = (distanceM * 1.3) / metersPerMin;
+  const low = Math.max(1, Math.round(base * 0.8));
+  const high = Math.max(low + 1, Math.round(base * 1.3));
+  return [low, high];
+}
