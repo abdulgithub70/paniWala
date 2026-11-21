@@ -10,11 +10,16 @@ export class FirebaseService {
   constructor(config: ConfigService) {
     const b64 = config.get<string>('FIREBASE_SERVICE_ACCOUNT_BASE64');
     if (!b64) {
-      this.logger.warn('Firebase is not configured: real phone OTP login is disabled.');
+      this.logger.warn('Firebase is not configured: real phone OTP login and push notifications are disabled.');
       return;
     }
     const credential = JSON.parse(Buffer.from(b64, 'base64').toString('utf8'));
     this.app = admin.apps.length ? admin.app() : admin.initializeApp({ credential: admin.credential.cert(credential) });
+  }
+
+  /** FCM client, or undefined when Firebase is not configured. */
+  get messaging(): admin.messaging.Messaging | undefined {
+    return this.app?.messaging();
   }
 
   /** Verifies a Firebase ID token and returns the verified phone number (E.164). */
