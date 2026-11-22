@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { OfferStatus, OrderStatus, Prisma } from '@prisma/client';
 import {
-  MAX_OFFER_ATTEMPTS, NEARBY_RADIUS_M, OFFER_TIMEOUT_SEC, SEARCH_TIMEOUT_SEC, STALE_LOCATION_SEC,
+  NEARBY_RADIUS_M, OFFER_TIMEOUT_SEC, REOFFER_COOLDOWN_SEC, SEARCH_TIMEOUT_SEC, STALE_LOCATION_SEC,
 } from '../common/constants';
 import { boundingBox, haversineM } from '../common/geo.util';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -30,9 +30,12 @@ export class DispatchService {
   constructor(private readonly prisma: PrismaService, private readonly notifications: NotificationsService) {}
 
   /**
-   * Offers the order to the nearest eligible vendor who has not been asked yet.
-   * Safe to call at any time and from several places: the per-order lock serialises calls and the
-   * method does nothing if an offer is already live or the order is no longer searching.
+   * Keeps the order searching for up to SEARCH_TIMEOUT_SEC. Each call offers the order to the nearest
+   * eligible vendor:
+   *  - a vendor who REJECTED this order is never asked again,
+   *  - a vendor who did not answer may be asked again after REOFFER_COOLDOWN_SEC,
+   *  - a vendor who comes online or moves into range later is picked up on the next sweep.
+   * Safe to call at any time and from several places: the per-order lock serialises calls.
    * Push notifications go out only after the transaction has committed.
    */
   async dispatch(orderId: string): Promise<void> {
@@ -54,19 +57,25 @@ export class DispatchService {
         const live = await tx.orderOffer.count({ where: { orderId, status: OfferStatus.PENDING } });
         if (live > 0) return null; // someone is still deciding
 
-        const attempts = await tx.orderOffer.count({ where: { orderId } });
         const elapsedSec = (now.getTime() - order.createdAt.getTime()) / 1000;
-        if (attempts >= MAX_OFFER_ATTEMPTS || elapsedSec > SEARCH_TIMEOUT_SEC) {
+        if (elapsedSec > SEARCH_TIMEOUT_SEC) {
           const gaveUp = await this.giveUp(tx, orderId);
           return gaveUp ? { kind: 'gave-up', customerId: order.customerId } : null;
         }
 
-        const tried = await tx.orderOffer.findMany({ where: { orderId }, select: { vendorId: true } });
+        const history = await tx.orderOffer.findMany({
+          where: { orderId },
+          select: { id: true, vendorId: true, status: true, sentAt: true },
+        });
+        const cooldownMs = REOFFER_COOLDOWN_SEC * 1000;
+        const rejected = history.filter((h) => h.status === OfferStatus.REJECTED).map((h) => h.vendorId);
+        const cooling = history.filter((h) => now.getTime() - h.sentAt.getTime() < cooldownMs).map((h) => h.vendorId);
+
         const busyWithOffer = await tx.orderOffer.findMany({
           where: { status: OfferStatus.PENDING, expiresAt: { gt: now } },
           select: { vendorId: true },
         });
-        const excluded = [...tried, ...busyWithOffer].map((o) => o.vendorId);
+        const excluded = [...rejected, ...cooling, ...busyWithOffer.map((o) => o.vendorId)];
 
         const box = boundingBox(order.latitude, order.longitude, NEARBY_RADIUS_M);
         const fresh = new Date(now.getTime() - STALE_LOCATION_SEC * 1000);
@@ -97,18 +106,22 @@ export class DispatchService {
           .filter((c) => c.distanceM <= c.radius)
           .sort((a, b) => a.distanceM - b.distanceM);
 
-        // No vendor right now: stay SEARCHING; the sweeper retries until the search window closes.
+        // Nobody in range right now: the order simply keeps waiting. A vendor who comes online
+        // later is found by the next sweep, and the customer does not have to stay in the app.
         if (ranked.length === 0) return null;
 
         const best = ranked[0];
-        const offer = await tx.orderOffer.create({
-          data: {
-            orderId,
-            vendorId: best.userId,
-            distanceM: Math.round(best.distanceM),
-            expiresAt: new Date(now.getTime() + OFFER_TIMEOUT_SEC * 1000),
-          },
-        });
+        const expiresAt = new Date(now.getTime() + OFFER_TIMEOUT_SEC * 1000);
+        const distanceM = Math.round(best.distanceM);
+
+        // An (order, vendor) pair is unique, so asking the same vendor again revives the old row.
+        const previous = history.find((h) => h.vendorId === best.userId);
+        const offer = previous
+          ? await tx.orderOffer.update({
+              where: { id: previous.id },
+              data: { status: OfferStatus.PENDING, sentAt: now, expiresAt, respondedAt: null, distanceM },
+            })
+          : await tx.orderOffer.create({ data: { orderId, vendorId: best.userId, distanceM, expiresAt } });
 
         const amount = calculatePrice({
           unitPricePaise: best.price, quantity: order.quantity, floor: order.floor,
@@ -137,7 +150,7 @@ export class DispatchService {
     } else {
       void this.notifications.notifyUser(result.customerId, {
         title: 'No vendor available',
-        body: 'All nearby vendors are busy or offline. Please try again in a few minutes.',
+        body: 'We could not find a vendor in your area. Please try again later.',
         channel: 'orders',
         data: { type: 'ORDER_UPDATE', orderId },
       });
